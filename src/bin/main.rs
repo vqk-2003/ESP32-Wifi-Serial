@@ -10,9 +10,9 @@
 use core::str::FromStr;
 use defmt::{info, warn};
 use edge_http::Method;
-use edge_http::io::Error;
 use edge_http::io::server::DefaultServer;
 use edge_nal::TcpBind;
+use edge_ws::FrameType;
 use embassy_executor::Spawner;
 use embassy_net::{Ipv4Cidr, Runner, Stack, StackResources};
 use embassy_time::Timer;
@@ -91,7 +91,7 @@ async fn main(spawner: Spawner) -> ! {
     let (stack, runner) = embassy_net::new(
         device,
         config,
-        mk_static!(StackResources<3>, StackResources::<3>::new()),
+        mk_static!(StackResources<4>, StackResources::<4>::new()),
         seed,
     );
 
@@ -99,9 +99,11 @@ async fn main(spawner: Spawner) -> ! {
     spawner.spawn(net_task(runner).unwrap());
     spawner.spawn(run_dhcp(stack, gw_ip_addr_str).unwrap());
 
+    const PORT: u16 = 8080;
+
     info!(
-        "Connect to the AP 'esp-radio' and point your browser to http://{}:8080/",
-        gw_ip_addr_str
+        "Connect to the AP 'esp-radio' and point your browser to http://{}:{}/",
+        gw_ip_addr_str, PORT
     );
     info!("DHCP is enabled so there is no need to configure a static IP, just in case:");
 
@@ -122,25 +124,32 @@ async fn main(spawner: Spawner) -> ! {
     let acceptor = socket
         .bind(core::net::SocketAddr::V4(SocketAddrV4::new(
             Ipv4Addr::UNSPECIFIED,
-            8080,
+            PORT,
         )))
         .await
         .unwrap();
 
     let mut server = DefaultServer::new();
 
-    loop {
-        // TODO: Read more about the Q parameter
-        // Currently any number larger than 1 causes panicking
-        // And replace run_with_socket_queue with run also causes
-        // panicking
-        _ = server
-            .run_with_socket_queue::<_, _, 1>(None, acceptor, WsHandler)
-            .await
-            .inspect_err(|_| warn!("HTTP server error"));
-        Timer::after_millis(500).await;
-    }
+    // Q parameter specify the maximum number of concurrent
+    // socket connection, to increase Q, you must first increase
+    // StackResoures<N> number, currently DHCP and DNS
+    // need one socket slot if enabled, our code need atleast
+    // one for TCP, so the number of StackResources must be
+    // >= 3.
+    // We set Q=2 here because Websocket upgrade request create
+    // a new socket rather than reusing the same socket
+    // if we set Q=1, the Websocket upgrade request will automatically
+    // close by the server.
+    _ = server
+        .run_with_socket_queue::<_, _, 2>(None, acceptor, WsHandler) //
+        .await
+        .inspect_err(|_| warn!("HTTP server error"));
 
+    // If the server ever returns, catch it here
+    loop {
+        Timer::after_millis(10000).await;
+    }
     // for inspiration have a look at the examples at https://github.com/esp-rs/esp-hal/tree/esp-hal-v1.2.2/examples
 }
 
@@ -212,11 +221,23 @@ async fn net_task(mut runner: Runner<'static, Interface>) {
     runner.run().await
 }
 
+#[derive(Debug)]
+enum WsHandlerError<C, W> {
+    Connection(C),
+    Ws(W),
+}
+
+impl<C, W> From<C> for WsHandlerError<C, W> {
+    fn from(e: C) -> Self {
+        WsHandlerError::Connection(e)
+    }
+}
+
 struct WsHandler;
 
 impl edge_http::io::server::Handler for WsHandler {
     type Error<E>
-        = Error<E>
+        = WsHandlerError<edge_http::io::Error<E>, edge_ws::Error<E>>
     where
         E: core::fmt::Debug;
 
@@ -234,29 +255,44 @@ impl edge_http::io::server::Handler for WsHandler {
             connection
                 .initiate_response(405, Some("Method Not Allowed"), &[])
                 .await?;
-        } else if headers.path == "/" {
+            return Ok(());
+        }
+
+        if connection.is_ws_upgrade_request()? {
+            use edge_http::ws::MAX_BASE64_KEY_RESPONSE_LEN;
+
+            let mut buf = [0u8; MAX_BASE64_KEY_RESPONSE_LEN];
+            connection.initiate_ws_upgrade_response(&mut buf).await?;
+
+            connection.complete().await?;
+
+            info!("Connection upgraded to WS");
+
+            let socket = connection.unbind()?;
+            let (_recv, mut send) = socket.split();
+
+            loop {
+                edge_ws::io::send(&mut send, FrameType::Text(false), None, b"Hello Khanh")
+                    .await
+                    .map_err(WsHandlerError::Ws)?;
+
+                Timer::after_millis(10000).await;
+            }
+        }
+
+        if headers.path == "/" {
             connection
                 .initiate_response(200, Some("OK"), &[("Content-Type", "text/html")])
                 .await?;
             connection
                 .write_all(include_bytes!("../index.html"))
                 .await?;
-        } else if headers.path == "/button" {
-            connection
-                .initiate_response(200, Some("OK"), &[("Content-Type", "text/html")])
-                .await?;
-            connection
-                .write_all(
-                    b"\
-                <p><b>Button Pressed!</b><p>\
-                ",
-                )
-                .await?;
-        } else {
-            connection
-                .initiate_response(404, Some("Not Found"), &[])
-                .await?;
+            return Ok(());
         }
+
+        connection
+            .initiate_response(404, Some("Not Found"), &[])
+            .await?;
 
         Ok(())
     }

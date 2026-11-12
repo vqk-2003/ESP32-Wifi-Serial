@@ -1,5 +1,51 @@
-<p><strong><i>Hello</i> <mark>Khanh</mark>!</strong></p>
+<p>
+	<strong>
+		<i>Hello</i>
+		<mark>Khanh</mark>!
+	</strong>
+</p>
 
-<button type="button" onclick="location.href='button'">
-Like
-</button>
+<button type="button" onclick=init()>Init Websocket</button>
+
+<button id="button" type="button">Send</button>
+
+<textarea id="log" rows=10 cols=50></textarea>
+
+<script>
+	var websocket;
+
+	function initWebSocket() {
+		console.log("Trying to open a WebSocket connection...");
+		websocket = new WebSocket("ws://192.168.2.1:8080")
+		websocket.addEventListener("open", onOpen);
+		websocket.addEventListener("close", onClose);
+		websocket.addEventListener("message", onMessage);
+	}
+
+	function onOpen(event) {
+		console.log("Connecton open");
+	}
+
+	function onClose(event) {
+		console.log("Connection close");
+	}
+
+	function onMessage(event) {
+		// Source: https://stackoverflow.com/a/41219358
+		var txt = document.getElementById("log");
+		txt.value += "\n" + event.data;
+	}
+
+	function initButton() {
+		document.getElementById("button").addEventListener("click", send);
+	}
+
+	function send() {
+		websocket.send("Hello ESP32");
+	}
+
+	function init() {
+		initWebSocket();
+		initButton();
+	}
+</script>
