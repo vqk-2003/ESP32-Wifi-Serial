@@ -1256,7 +1256,9 @@ dependencies = [
  "edge-nal-embassy",
  "edge-ws",
  "embassy-executor",
+ "embassy-futures",
  "embassy-net",
+ "embassy-sync 0.8.0",
  "embassy-time",
  "embedded-io 0.7.1",
  "embedded-io-async 0.7.0",
@@ -1267,6 +1269,7 @@ dependencies = [
  "esp-println",
  "esp-radio",
  "esp-rtos",
+ "heapless 0.9.3",
  "smoltcp 0.14.0",
  "static_cell",
 ]

@@ -1,15 +1,22 @@
+<h1>
+	ESP32 Websocket Serial
+</h1>
+
 <p>
-	<strong>
-		<i>Hello</i>
-		<mark>Khanh</mark>!
-	</strong>
+	<button type="button" onclick=init()>Init Websocket</button>
 </p>
 
-<button type="button" onclick=init()>Init Websocket</button>
+<p>
+	<textarea id="log" rows=10 cols=50></textarea>
+</p>
 
-<button id="button" type="button">Send</button>
+<p>
+	Input: <input type="text" id="user_input">
+</p>
 
-<textarea id="log" rows=10 cols=50></textarea>
+<p>
+	<button id="button" type="button">Send</button>
+</p>
 
 <script>
 	var websocket;
@@ -33,7 +40,7 @@
 	function onMessage(event) {
 		// Source: https://stackoverflow.com/a/41219358
 		var txt = document.getElementById("log");
-		txt.value += "\n" + event.data;
+		txt.value += event.data;
 	}
 
 	function initButton() {
@@ -41,7 +48,8 @@
 	}
 
 	function send() {
-		websocket.send("Hello ESP32");
+		var user = document.getElementById("user_input");
+		websocket.send(user.value + "\r\n");
 	}
 
 	function init() {

@@ -14,13 +14,17 @@ use edge_http::io::server::DefaultServer;
 use edge_nal::TcpBind;
 use edge_ws::FrameType;
 use embassy_executor::Spawner;
+use embassy_futures::select::select;
 use embassy_net::{Ipv4Cidr, Runner, Stack, StackResources};
-use embassy_time::Timer;
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::channel::Channel;
+use embassy_time::{Duration, Timer, WithTimeout};
 use embedded_io_async::Write;
 use esp_backtrace as _;
 use esp_hal::clock::CpuClock;
 use esp_hal::rng::Rng;
 use esp_hal::timer::timg::TimerGroup;
+use esp_hal::uart::{Uart, UartRx, UartTx};
 use esp_println as _;
 use esp_radio::wifi::ap::AccessPointConfig;
 use esp_radio::wifi::{self, ControllerConfig, Interface, WifiController};
@@ -42,6 +46,9 @@ macro_rules! mk_static {
 }
 
 const GW_IP_ADDR_ENV: Option<&'static str> = option_env!("GATEWAY_IP");
+
+static RX_BUF: Channel<CriticalSectionRawMutex, u8, 1024> = Channel::new();
+static TX_BUF: Channel<CriticalSectionRawMutex, u8, 1024> = Channel::new();
 
 #[allow(
     clippy::large_stack_frames,
@@ -113,6 +120,16 @@ async fn main(spawner: Spawner) -> ! {
     stack.config_v4().inspect(|c| info!("ipv4 config: {:?}", c));
 
     // Network is ready
+
+    // Serial
+    let (ser_rx, ser_tx) = Uart::new(peripherals.UART1, Default::default())
+        .unwrap()
+        .with_tx(peripherals.GPIO16)
+        .with_rx(peripherals.GPIO17)
+        .into_async()
+        .split();
+    spawner.spawn(serial_tx_handler(ser_tx).unwrap());
+    spawner.spawn(serial_rx_handler(ser_rx).unwrap());
 
     use core::net::{Ipv4Addr, SocketAddrV4};
 
@@ -258,6 +275,9 @@ impl edge_http::io::server::Handler for WsHandler {
             return Ok(());
         }
 
+        // Once we upgrade the request, there is no turning back,
+        // the TCP socket will enter a loop.
+        // TODO: Design a way to gracefully close the connection.
         if connection.is_ws_upgrade_request()? {
             use edge_http::ws::MAX_BASE64_KEY_RESPONSE_LEN;
 
@@ -269,14 +289,36 @@ impl edge_http::io::server::Handler for WsHandler {
             info!("Connection upgraded to WS");
 
             let socket = connection.unbind()?;
-            let (_recv, mut send) = socket.split();
+            let (mut recv, mut send) = socket.split();
 
             loop {
-                edge_ws::io::send(&mut send, FrameType::Text(false), None, b"Hello Khanh")
-                    .await
-                    .map_err(WsHandlerError::Ws)?;
-
-                Timer::after_millis(10000).await;
+                select(
+                    async {
+                        let sender = TX_BUF.sender();
+                        let mut buf = [0u8; 1024];
+                        loop {
+                            let (frame, n) = edge_ws::io::recv(&mut recv, &mut buf).await.unwrap();
+                            match frame {
+                                FrameType::Text(_) => {
+                                    for val in buf.iter().take(n) {
+                                        sender.send(*val).await;
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    },
+                    async {
+                        let receiver = RX_BUF.receiver();
+                        loop {
+                            let data = receiver.receive().await;
+                            edge_ws::io::send(&mut send, FrameType::Text(false), None, &[data])
+                                .await
+                                .unwrap();
+                        }
+                    },
+                )
+                .await;
             }
         }
 
@@ -295,5 +337,26 @@ impl edge_http::io::server::Handler for WsHandler {
             .await?;
 
         Ok(())
+    }
+}
+
+#[embassy_executor::task]
+async fn serial_tx_handler(mut ser_tx: UartTx<'static, esp_hal::Async>) {
+    let receiver = TX_BUF.receiver();
+    loop {
+        let data = receiver.receive().await;
+        ser_tx.write_async(&[data]).await.unwrap();
+    }
+}
+
+#[embassy_executor::task]
+async fn serial_rx_handler(mut ser_rx: UartRx<'static, esp_hal::Async>) {
+    let sender = RX_BUF.sender();
+    let mut buf = [0u8; 512];
+    loop {
+        let n = ser_rx.read_async(&mut buf).await.unwrap();
+        for val in buf.iter().take(n) {
+            sender.send(*val).await;
+        }
     }
 }
